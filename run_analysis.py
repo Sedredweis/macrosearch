@@ -16,10 +16,13 @@ OUT['T'] = T; OUT['period'] = [X.index[0], X.index[-1]]
 OUT['na_err'] = float(np.abs(M.agg_dY(Y) - X.dY_obs.values).max())
 OUT['na_w'] = M.W_Y
 ps = X.pistar.values
-OUT['pistar'] = dict(mean=400*ps.mean(), sd=400*ps.std(),
+# среднее — уровень: аннуализируем компаундированием (M.ann_pct);
+# с.к.о. — мера разброса лог-приростов, для неё компаундирование не определено,
+# оставлен линейный масштаб M.ANN.
+OUT['pistar'] = dict(mean=float(M.ann_pct(ps.mean())), sd=M.ANN*ps.std(),
                      ar1=float(np.corrcoef(ps[1:], ps[:-1])[0, 1]))
 alt = X.dPC.values - (X.pistar.values - X.dPC.values)     # альтернативное соглашение
-OUT['pistar_alt'] = dict(mean=400*alt.mean(), sd=400*alt.std())
+OUT['pistar_alt'] = dict(mean=float(M.ann_pct(alt.mean())), sd=M.ANN*alt.std())
 desc = pd.DataFrame({'mean': Y.mean(0), 'sd': Y.std(0),
                      'ar1': [np.corrcoef(Y[1:, j], Y[:-1, j])[0, 1] for j in range(len(V))]},
                     index=V)
@@ -41,7 +44,12 @@ Pi = [m.B[l*m.n:(l+1)*m.n].T for l in range(P4)]
 lagr = np.array([(A0 @ Pi[l])[kR] for l in range(P4)])
 rho = float(lagr[:, kR].sum())
 OUT['rule'] = dict(rho=round(rho, 3),
+                   # phi_pi/phi_dy — реакция на 1 п.п. ГОДОВОГО темпа. Линейный
+                   # пересчёт /400 верен в пределе малых темпов; phi_pi_exact —
+                   # то же в точке цели 4% год.: d(лог-квартал)/d(pi_год) = 1/(4*1.04*100).
                    phi_pi=round(float((row[kP] + lagr[:, kP].sum())/(1-rho)/400), 3),
+                   phi_pi_exact=round(float((row[kP] + lagr[:, kP].sum())/(1-rho)
+                                            * (M.q_from_ann(4.0 + 1.0) - M.q_from_ann(4.0))), 3),
                    phi_dy=round(float((row @ M.WVEC + (lagr @ M.WVEC).sum())/(1-rho)/400), 3),
                    phi_e=round(float((row[kX] + lagr[:, kX].sum())/(1-rho)/100), 4),
                    sd_shock=round(float(S[kR, kR]), 3))
@@ -52,11 +60,12 @@ Sset, kid = M.identify(m, ndraw=6000, seed=7)
 OUT['nrot'] = len(Sset)
 IR = np.array([m.irf(20, s) for s in Sset]); DY = np.array([M.agg_dY(x) for x in IR])
 mp = kid['mp']
+# IRF — отклонения от базы, а не уровни: аннуализация линейная (M.ANN).
 OUT['mp_irf'] = [dict(h=h,
     rG=round(float(IRc[h, kR, kR]), 3),
-    pi=round(float(400*IRc[h, kP, kR]), 3),
-    pi16=round(float(400*np.percentile(IR[:, h, kP, mp], 16)), 3),
-    pi84=round(float(400*np.percentile(IR[:, h, kP, mp], 84)), 3),
+    pi=round(float(M.ANN*IRc[h, kP, kR]), 3),
+    pi16=round(float(M.ANN*np.percentile(IR[:, h, kP, mp], 16)), 3),
+    pi84=round(float(M.ANN*np.percentile(IR[:, h, kP, mp], 84)), 3),
     dY=round(float(100*DYc[h, kR]), 3),
     dY16=round(float(100*np.percentile(DY[:, h, mp], 16)), 3),
     dY84=round(float(100*np.percentile(DY[:, h, mp], 84)), 3),
@@ -77,7 +86,7 @@ OUT['chol_in_set'] = dict(rG012=[round(float(IRc[h, kR, kR]), 3) for h in (0,1,2
 def irrow(j, var, sc=100):
     return [round(float(sc*IRc[h, V.index(var), j]), 3) for h in [0,1,2,4,8,12]]
 OUT['other'] = {nm: dict(rG=[round(float(IRc[h, kR, V.index(nm)]), 3) for h in [0,1,2,4,8,12]],
-                         pi=irrow(V.index(nm), 'dPC', 400), dY=[round(float(100*DYc[h, V.index(nm)]), 3)
+                         pi=irrow(V.index(nm), 'dPC', M.ANN), dY=[round(float(100*DYc[h, V.index(nm)]), 3)
                          for h in [0,1,2,4,8,12]], dNFX=irrow(V.index(nm), 'dNFX'))
                 for nm in ['dPC','dNFX','dG','dC','dI','dEX','pistar','dInc']}
 
@@ -102,7 +111,8 @@ grid = {}
 for p in (2, 4, 6):
     for lam in (0.1, 0.35, 1.0, 2.0):
         grid[f'p={p}, λ={lam}'] = M.oos_rmse(Y, p, lam, H=8, start=120)
-OUT['oos'] = {k: dict(pi1=round(400*v['pi1'],3), pi4=round(100*v['pi4'],3),
+# RMSE — метрика ошибки в лог-пунктах, компаундирование к ней неприменимо.
+OUT['oos'] = {k: dict(pi1=round(M.ANN*v['pi1'],3), pi4=round(100*v['pi4'],3),
                       r1=round(v['r1'],3), r4=round(v['r4'],3))
               for k, v in {**grid, **bench}.items()}
 
@@ -113,16 +123,16 @@ scen = {}
 scen['траектория'], _ = m.scenario(np.array([-40.0, 45.0, 6.0, 6.0, 6.0, 6.5, 6.0, 6.5, 6.0, 6.5, 6.0, 6.5]), S, kR)
 scen['оптимум 3.8/5.3/6.6%'], _ = m.scenario(np.repeat([3.82, 5.32, 6.64], 4), S, kR)
 OUT['scen'] = {nm: dict(rG=[round(float(v), 2) for v in pth[:, kR]],
-                        pi_y1=round(float(100*pth[0:4, kP].sum()), 2),
-                        pi_y2=round(float(100*pth[4:8, kP].sum()), 2),
-                        pi_y3=round(float(100*pth[8:12, kP].sum()), 2),
+                        pi_y1=round(float(M.yoy_pct(pth[0:4, kP])), 2),
+                        pi_y2=round(float(M.yoy_pct(pth[4:8, kP])), 2),
+                        pi_y3=round(float(M.yoy_pct(pth[8:12, kP])), 2),
                         dY_y1=round(float(100*M.agg_dY(pth)[0:4].sum()), 2))
                for nm, pth in scen.items()}
 # оптимальная постоянная ставка под метрику RMSE годовой инфляции от 4%
 gridr = np.arange(0.0, 16.01, 0.25); best = None
 for r in gridr:
     pth, _ = m.scenario(np.full(12, r), S, kR)
-    a = np.array([100*pth[i:i+4, kP].sum() for i in (0, 4, 8)])
+    a = np.array([M.yoy_pct(pth[i:i+4, kP]) for i in (0, 4, 8)])
     rm = float(np.sqrt(np.mean((a - 4.0) ** 2)))
     if best is None or rm < best[1]:
         best = (float(r), rm, [round(float(v), 2) for v in a])
@@ -131,7 +141,7 @@ OUT['best_const_rate'] = dict(rate=best[0], rmse=round(best[1], 3), infl=best[2]
 # ---------------------------------------------------------------- рисунки
 plt.rcParams.update({'font.size': 8, 'axes.grid': True, 'grid.alpha': .3,
                      'figure.dpi': 150})
-pan = [('rG', 'Ключевая ставка, п.п.', 1), ('dPC', 'Инфляция, % год.', 400),
+pan = [('rG', 'Ключевая ставка, п.п.', 1), ('dPC', 'Инфляция, % год.', M.ANN),
        ('__dY', 'Выпуск, %', 100), ('dC', 'Потребление, %', 100),
        ('dI', 'Инвестиции, %', 100), ('dL', 'Занятость, %', 100),
        ('dNFX', 'Ном. курс, %', 100), ('dIM', 'Импорт, %', 100)]
@@ -152,7 +162,7 @@ fig.tight_layout(); fig.savefig('fig_irf_mp.png', bbox_inches='tight'); plt.clos
 fig, ax = plt.subplots(1, 2, figsize=(9, 3.2))
 for nm, pth in scen.items():
     seq = np.concatenate([Y[-3:, kP], pth[:, kP]])       # склейка с фактом
-    ann = [100*seq[i:i+4].sum() for i in range(12)]
+    ann = [M.yoy_pct(seq[i:i+4]) for i in range(12)]
     ax[0].plot(range(1, 13), pth[:, kR], lw=1.4, label=nm)
     ax[1].plot(range(1, 13), ann, lw=1.4, label=nm)
 ax[1].axhline(4, color='r', ls='--', lw=1, label='цель 4%')
